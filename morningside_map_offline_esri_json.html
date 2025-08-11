@@ -1,0 +1,96 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Morningside Parcels (Offline, ESRI JSON)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html,body,#map { height: 100%; margin:0; padding:0; }
+    .controls { position: absolute; top:8px; right:8px; z-index:999; background:white; padding:8px; border-radius:6px; box-shadow:0 1px 4px rgba(0,0,0,0.3); font-family: Arial, sans-serif; }
+    .btn { display:inline-block; padding:6px 8px; margin:4px 0; background:#1976d2; color:white; border-radius:4px; cursor:pointer; text-decoration:none; }
+    .btn:disabled { background: #999; cursor: default; }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<div class="controls">
+  <div><strong>Morningside / Lenox Park — Single‑Family ≥ 0.25 ac</strong></div>
+  <div style="margin-top:6px;">
+    <button id="exportBtn" class="btn" disabled>Export GeoJSON</button>
+  </div>
+  <div style="margin-top:8px;font-size:12px;">
+    Offline: loads <code>parcels_esri.json</code> and converts it to GeoJSON in your browser.
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+function esriToGeoJSON(fc){
+  if (!fc || !fc.features) return {type:'FeatureCollection', features:[]};
+  const out = {type:'FeatureCollection', features:[]};
+  for (const f of fc.features){
+    let gjGeom = null;
+    const g = f.geometry;
+    if (g){
+      if (g.rings) gjGeom = {type:'Polygon', coordinates: g.rings};
+      else if (g.paths) gjGeom = {type:'LineString', coordinates: g.paths[0]};
+      else if (g.x!=null && g.y!=null) gjGeom = {type:'Point', coordinates:[g.x, g.y]};
+    }
+    out.features.push({type:'Feature', geometry: gjGeom, properties: f.attributes || {}});
+  }
+  return out;
+}
+
+const map = L.map('map').setView([33.798, -84.358], 14);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19, attribution:'© OpenStreetMap contributors'}).addTo(map);
+
+let layer = L.geoJSON(null, {
+  style: ()=>({color:'#ff7800', weight:1.5, fill:false}),
+  onEachFeature: (feature, lyr)=>{
+    const p = feature.properties || {};
+    const owner = [p.OWNERNME1, p.OWNERNME2].filter(Boolean).join(' & ');
+    const sqft = Math.round(p.SHAPE_Area || 0);
+    const acres = sqft ? Math.round((sqft/43560)*10000)/10000 : '';
+    const html = `<div style="font-size:13px"><strong>${p.SITEADDRESS||'No address'}</strong><br>
+      Owner: ${owner||'n/a'}<br>APN: ${p.PARCELID||'n/a'}<br>Zone: ${p.ZONING1||'n/a'}<br>
+      Area: ${acres} ac (${sqft} sq ft)</div>`;
+    lyr.bindPopup(html);
+  }
+}).addTo(map);
+
+fetch('parcels_esri.json')
+  .then(r=>r.json())
+  .then(data=>{
+    const gj = esriToGeoJSON(data);
+    // Keep polygons only
+    gj.features = gj.features.filter(f => f.geometry && (f.geometry.type==='Polygon' || f.geometry.type==='MultiPolygon'));
+    layer.addData(gj);
+    const b = layer.getBounds();
+    if (b.isValid()) map.fitBounds(b, {padding:[20,20]});
+    if (gj.features.length){
+      window._result = gj;
+      document.getElementById('exportBtn').disabled = false;
+    }
+  })
+  .catch(e=>{
+    alert('Could not load parcels_esri.json. Make sure it is uploaded next to this HTML.');
+    console.error(e);
+  });
+
+function download(filename, text) {
+  const a = document.createElement('a');
+  a.href = 'data:application/geo+json;charset=utf-8,' + encodeURIComponent(text);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+document.getElementById('exportBtn').addEventListener('click', ()=>{
+  if (!window._result) return alert('No data loaded yet.');
+  download('morningside_singlefamily_0.25ac_parcels.geojson', JSON.stringify(window._result));
+});
+</script>
+</body>
+</html>
