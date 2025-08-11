@@ -1,0 +1,133 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Morningside Single-Family Parcels ≥ 0.25 ac (Proxy Fallback)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html,body,#map { height: 100%; margin:0; padding:0; }
+    .controls { position: absolute; top:8px; right:8px; z-index:999; background:white; padding:8px; border-radius:6px; box-shadow:0 1px 4px rgba(0,0,0,0.3); font-family: Arial, sans-serif; }
+    .btn { display:inline-block; padding:6px 8px; margin:4px 0; background:#1976d2; color:white; border-radius:4px; cursor:pointer; text-decoration:none; }
+    .btn:disabled { background: #999; cursor: default; }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<div class="controls">
+  <div><strong>Morningside / Lenox Park — Single‑Family ≥ 0.25 ac</strong></div>
+  <div style="margin-top:6px;">
+    <button id="runBtn" class="btn">Load parcels</button>
+    <button id="exportBtn" class="btn" disabled>Export GeoJSON</button>
+  </div>
+  <div style="margin-top:8px;font-size:12px;">
+    If county/city servers block cross‑origin requests, this version tries a <em>public CORS proxy</em> automatically.
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+<script>
+const OSM = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19, attribution:'© OpenStreetMap contributors'});
+
+const map = L.map('map').setView([33.798, -84.358], 14);
+OSM.addTo(map);
+
+let resultsLayer = L.geoJSON(null, {style: ()=>({color:'#ff7800', weight:1.5, fill:false})}).addTo(map);
+let neighborhoodLayer = L.geoJSON(null, {style: ()=>({color:'#1976d2', weight:2, fill:false})}).addTo(map);
+
+const ATL_NEIGHBORHOODS_URL = 'https://gis.atlantaga.gov/dpcd/rest/services/OpenDataService1/MapServer/3/query';
+const ATL_TAXPARCEL_URL    = 'https://gis.atlantaga.gov/dpcd/rest/services/OpenDataService1/MapServer/25/query';
+
+// Helper to do fetch with automatic cors proxy fallback
+async function fetchWithProxy(url){
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('HTTP '+r.status);
+    return await r.json();
+  } catch (e){
+    const prox = 'https://cors.isomorphic-git.org/' + url;
+    const r2 = await fetch(prox);
+    if (!r2.ok) throw new Error('Proxy HTTP '+r2.status);
+    return await r2.json();
+  }
+}
+
+// Get Morningside/Lenox Park polygon
+async function getNeighborhood(){
+  const where = encodeURIComponent("UPPER(NAME) LIKE '%MORNINGSIDE%' OR UPPER(NAME) LIKE '%LENOX PARK%'");
+  const url = `${ATL_NEIGHBORHOODS_URL}?where=${where}&outFields=NAME,OBJECTID&returnGeometry=true&f=geojson&outSR=4326`;
+  const gj = await fetchWithProxy(url);
+  if (!gj.features || !gj.features.length) throw new Error('Neighborhood not found');
+  return gj.features[0];
+}
+
+// Query City TaxParcel layer directly (has owner + zoning + neighborhood fields)
+// Filter: NEIGHBORHOOD contains MORNINGSIDE, SHAPE_Area >= 10890 sq ft (0.25 ac), and ZONING1 starts with 'R' (typical single‑family)
+async function getParcels(){
+  const where = encodeURIComponent("(UPPER(NEIGHBORHOOD) LIKE '%MORNINGSIDE%' OR UPPER(NEIGHBORHOOD) LIKE '%LENOX%') AND SHAPE_Area >= 10890 AND UPPER(ZONING1) LIKE 'R%'");
+  const outFields = encodeURIComponent("PARCELID,SITEADDRESS,OWNERNME1,OWNERNME2,NEIGHBORHOOD,SHAPE_Area,ZONING1");
+  const url = `${ATL_TAXPARCEL_URL}?where=${where}&outFields=${outFields}&returnGeometry=true&f=geojson&outSR=4326`;
+  return await fetchWithProxy(url);
+}
+
+function bindPopups(layer){
+  layer.eachLayer(l=>{
+    const f = l.feature;
+    const p = f.properties || {};
+    const sqft = Math.round(p.SHAPE_Area || turf.area(f)*10.76391041671);
+    const acres = Math.round((sqft/43560)*10000)/10000;
+    const owner = [p.OWNERNME1, p.OWNERNME2].filter(Boolean).join(' & ');
+    const html = `<div style="font-size:13px"><strong>${p.SITEADDRESS||'No address'}</strong><br>
+    Owner: ${owner||'n/a'}<br>APN: ${p.PARCELID||'n/a'}<br>Zone: ${p.ZONING1||'n/a'}<br>
+    Area: ${acres} ac (${sqft} sq ft)</div>`;
+    l.bindPopup(html);
+  });
+}
+
+async function run(){
+  document.getElementById('runBtn').disabled = true;
+  resultsLayer.clearLayers(); neighborhoodLayer.clearLayers();
+  try {
+    const nb = await getNeighborhood();
+    neighborhoodLayer.addData(nb);
+    map.fitBounds(L.geoJSON(nb).getBounds(), {padding:[20,20]});
+
+    const parcels = await getParcels();
+    // Ensure polygons only
+    parcels.features = parcels.features.filter(f => f.geometry && (f.geometry.type==='Polygon' || f.geometry.type==='MultiPolygon'));
+    resultsLayer.addData(parcels);
+    bindPopups(resultsLayer);
+
+    if (!parcels.features.length) alert('No parcels matched filters (check zoning/area).');
+    else {
+      alert('Loaded ' + parcels.features.length + ' parcels.');
+      document.getElementById('exportBtn').disabled = false;
+      window._result = parcels;
+    }
+  } catch (e){
+    console.error(e);
+    alert('Failed to fetch even with proxy: ' + e.message);
+  } finally {
+    document.getElementById('runBtn').disabled = false;
+  }
+}
+
+function download(filename, text) {
+  const a = document.createElement('a');
+  a.href = 'data:application/geo+json;charset=utf-8,' + encodeURIComponent(text);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+document.getElementById('runBtn').addEventListener('click', run);
+document.getElementById('exportBtn').addEventListener('click', ()=>{
+  if (!window._result) return alert('No results yet.');
+  download('morningside_singlefamily_0.25ac_parcels.geojson', JSON.stringify(window._result));
+});
+</script>
+</body>
+</html>
